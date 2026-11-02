@@ -1,0 +1,103 @@
+name: Shadow Reckoning — Android APK CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+env:
+  UNITY_VERSION: 6000.0.23f1
+  BUILD_TARGET: Android
+
+jobs:
+  build-android-apk:
+    name: Build Shadow Reckoning APK (${{ env.BUILD_TARGET }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # 1. Checkout repository
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      # 2. Ensure ProjectVersion.txt and Android Package ID exist for headless GameCI
+      - name: Prepare Headless Unity 6 Project Configuration
+        shell: bash
+        run: |
+          mkdir -p ProjectSettings
+          if [ ! -f ProjectSettings/ProjectVersion.txt ]; then
+            echo "m_EditorVersion: ${{ env.UNITY_VERSION }}" > ProjectSettings/ProjectVersion.txt
+            echo "m_EditorVersionWithRevision: ${{ env.UNITY_VERSION }} (48276e679631)" >> ProjectSettings/ProjectVersion.txt
+          fi
+
+          # Ensure Android applicationIdentifier is explicitly set for batchmode APK compilation
+          BUILDER_FILE="Assets/Scripts/Editor/ShadowReckoningMasterBuilder.cs"
+          if [ -f "$BUILDER_FILE" ] && ! grep -q "SetApplicationIdentifier" "$BUILDER_FILE"; then
+            sed -i 's/PlayerSettings.productName = "Shadow Reckoning";/PlayerSettings.productName = "Shadow Reckoning";\n            PlayerSettings.SetApplicationIdentifier(BuildTargetGroup.Android, "com.shadowreckoningstudio.shadowreckoning");/' "$BUILDER_FILE"
+          fi
+
+      # 3. Cache Unity Library folder for faster subsequent builds
+      - name: Cache Unity Library
+        uses: actions/cache@v4
+        with:
+          path: Library
+          key: Library-${{ env.BUILD_TARGET }}-${{ hashFiles('Assets/**', 'Packages/**') }}
+          restore-keys: |
+            Library-${{ env.BUILD_TARGET }}-
+            Library-
+
+      # 4. Run GameCI Unity Builder to generate the 5-Zone Scene and compile the APK
+      - name: Compile Android APK via ShadowReckoningMasterBuilder
+        uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
+        with:
+          targetPlatform: ${{ env.BUILD_TARGET }}
+          unityVersion: ${{ env.UNITY_VERSION }}
+          buildMethod: ShadowReckoning.EditorTools.ShadowReckoningMasterBuilder.BuildAndroidAPK
+          buildsPath: Builds
+          buildName: ShadowReckoning
+          androidExportType: androidPackage
+
+      # 5. Verify APK output exists
+      - name: Verify Compiled APK Output
+        shell: bash
+        run: |
+          echo "Checking Builds directory contents:"
+          ls -laR Builds/
+          if [ ! -f "Builds/Android/ShadowReckoning.apk" ]; then
+            echo "Error: Builds/Android/ShadowReckoning.apk was not found!"
+            exit 1
+          fi
+
+      # 6. Upload Playable APK as a GitHub Actions Artifact on every push
+      - name: Upload Shadow Reckoning Android APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShadowReckoning-Android-APK-${{ github.sha }}
+          path: Builds/Android/ShadowReckoning.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      # 7. Automatically create a GitHub Release if a version tag (e.g., v1.0.0) is pushed
+      - name: Publish GitHub Release (On Tag Push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Builds/Android/ShadowReckoning.apk
+          generate_release_notes: true
